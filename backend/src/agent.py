@@ -243,7 +243,7 @@ async def entrypoint(ctx: JobContext):
         history_summary=history_summary
     )
 
-    # 3. Setup Agent
+    # 3. Setup
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
         llm=google.LLM(model="gemini-2.5-flash"),
