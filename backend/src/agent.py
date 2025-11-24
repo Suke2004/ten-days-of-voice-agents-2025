@@ -1,168 +1,268 @@
+# ======================================================
+# 🌿 DAILY WELLNESS VOICE COMPANION
+# 👨‍⚕️ Tutorial by Dr. Abhishek: https://www.youtube.com/@drabhishek.5460/videos
+# 💼 Professional Voice AI Development Course
+# 🚀 Context-Aware Agents & JSON Persistence
+# ======================================================
+
 import logging
 import json
-from typing import Annotated, List
+import os
+import asyncio
+from datetime import datetime
+from typing import Annotated, Literal, List, Optional
+from dataclasses import dataclass, field, asdict
+
+
+print("🚀 WELLNESS COMPANION")
+print("💡 agent.py LOADED SUCCESSFULLY!")
+
 
 from dotenv import load_dotenv
+from pydantic import Field
 from livekit.agents import (
     Agent,
     AgentSession,
     JobContext,
     JobProcess,
-    MetricsCollectedEvent,
     RoomInputOptions,
     WorkerOptions,
     cli,
     metrics,
-    tokenize,
-    function_tool,
+    MetricsCollectedEvent,
     RunContext,
+    function_tool,
 )
+
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
-from menu import MENU
+
 logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
+# ======================================================
+# 🧠 STATE MANAGEMENT & DATA STRUCTURES
+# ======================================================
 
-def format_menu_text():
-    """Return a readable menu string the agent can speak/display at the start."""
-    lines = ["Welcome to USR Starbucks. Here's our menu — read once at the start:"]
-    lines.append("\nServing options: " + ", ".join(MENU["servings"]))
-    # show a compact drinks list (grouping)
-    drinks_sample = MENU["drinks"]
-    lines.append("\nPopular drinks (examples): " + ", ".join(drinks_sample[:6]) + ", and more on the menu.")
-    # extras - show top suggestions
-    lines.append("\nCommon extras & customizations: " + ", ".join(MENU["extras_examples"][:6]) + ", etc.")
-    lines.append("\nI'll list everything for you now only once — after that I'll ask one quick question at a time.")
-    return "\n".join(lines)
+@dataclass
+class CheckInState:
+    """🌿 Holds data for the CURRENT daily check-in"""
+    mood: str | None = None
+    energy: str | None = None
+    objectives: list[str] = field(default_factory=list)
+    advice_given: str | None = None
+    
+    def is_complete(self) -> bool:
+        """✅ Check if we have the core check-in data"""
+        return all([
+            self.mood is not None,
+            self.energy is not None,
+            len(self.objectives) > 0
+        ])
+    
+    def to_dict(self) -> dict:
+        return asdict(self)
 
-class Assistant(Agent):
+@dataclass
+class Userdata:
+    """👤 User session data passed to the agent"""
+    current_checkin: CheckInState
+    history_summary: str  # String containing info about previous sessions
+    session_start: datetime = field(default_factory=datetime.now)
 
-    def __init__(self) -> None:
+# ======================================================
+# 💾 PERSISTENCE LAYERS (JSON LOGGING)
+# ======================================================
+WELLNESS_LOG_FILE = "wellness_log.json"
+
+def get_log_path():
+    base_dir = os.path.dirname(__file__)
+    backend_dir = os.path.abspath(os.path.join(base_dir, ".."))
+    return os.path.join(backend_dir, WELLNESS_LOG_FILE)
+
+def load_history() -> list:
+    """📖 Read previous check-ins from JSON"""
+    path = get_log_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding='utf-8') as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"⚠️ Could not load history: {e}")
+        return []
+
+def save_checkin_entry(entry: CheckInState) -> None:
+    """💾 Append new check-in to the JSON list"""
+    path = get_log_path()
+    history = load_history()
+    
+    # Create record
+    record = {
+        "timestamp": datetime.now().isoformat(),
+        "mood": entry.mood,
+        "energy": entry.energy,
+        "objectives": entry.objectives,
+        "summary": entry.advice_given
+    }
+    
+    history.append(record)
+    
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding='utf-8') as f:
+        json.dump(history, f, indent=4, ensure_ascii=False)
+        
+    print(f"\n✅ CHECK-IN SAVED TO {path}")
+
+# ======================================================
+# 🛠️ WELLNESS AGENT TOOLS
+# ======================================================
+
+@function_tool
+async def record_mood_and_energy(
+    ctx: RunContext[Userdata],
+    mood: Annotated[str, Field(description="The user's emotional state (e.g., happy, stressed, anxious)")],
+    energy: Annotated[str, Field(description="The user's energy level (e.g., high, low, drained, energetic)")],
+) -> str:
+    """📝 Record how the user is feeling. Call this after the user describes their state."""
+    ctx.userdata.current_checkin.mood = mood
+    ctx.userdata.current_checkin.energy = energy
+    
+    print(f"📊 MOOD LOGGED: {mood} | ENERGY: {energy}")
+    
+    return f"I've noted that you are feeling {mood} with {energy} energy. I'm listening."
+
+@function_tool
+async def record_objectives(
+    ctx: RunContext[Userdata],
+    objectives: Annotated[list[str], Field(description="List of 1-3 specific goals the user wants to achieve today")],
+) -> str:
+    """🎯 Record the user's daily goals. Call this when user states what they want to do."""
+    ctx.userdata.current_checkin.objectives = objectives
+    print(f"🎯 OBJECTIVES LOGGED: {objectives}")
+    return "I've written down your goals for the day."
+
+@function_tool
+async def complete_checkin(
+    ctx: RunContext[Userdata],
+    final_advice_summary: Annotated[str, Field(description="A brief 1-sentence summary of the advice given")],
+) -> str:
+    """💾 Finalize the session, provide a recap, and save to JSON. Call at the very end."""
+    state = ctx.userdata.current_checkin
+    state.advice_given = final_advice_summary
+    
+    if not state.is_complete():
+        return "I can't finish yet. I still need to know your mood, energy, or at least one goal."
+
+    # Save to JSON
+    save_checkin_entry(state)
+    
+    print("\n" + "⭐" * 30)
+    print("🎉 WELLNESS CHECK-IN COMPLETED!")
+    print(f"💭 Mood: {state.mood}")
+    print(f"🎯 Goals: {state.objectives}")
+    print("⭐" * 30 + "\n")
+
+    recap = f"""
+    Here is your recap for today:
+    You are feeling {state.mood} and your energy is {state.energy}.
+    Your main goals are: {', '.join(state.objectives)}.
+    
+    Remember: {final_advice_summary}
+    
+    I've saved this in your wellness log. Have a wonderful day!
+    """
+    return recap
+
+# ======================================================
+# 🧠 AGENT DEFINITION
+# ======================================================
+
+class WellnessAgent(Agent):
+    def __init__(self, history_context: str):
         super().__init__(
             instructions=f"""
-        You are a friendly, high-energy barista at "USR Starbucks". Your job is to take an order.
+            You are a compassionate, supportive Daily Wellness Companion.
+            
+            🧠 **CONTEXT FROM PREVIOUS SESSIONS:**
+            {history_context}
+            
+            🎯 **GOALS FOR THIS SESSION:**
+            1. **Check-in:** Ask how they are feeling (Mood) and their energy levels.
+               - *Reference the history context if available (e.g., "Last time you were tired, how is today?").*
+            2. **Intentions:** Ask for 1-3 simple objectives for the day.
+            3. **Support:** Offer small, grounded, NON-MEDICAL advice.
+               - Example: "Try a 5-minute walk" or "Break that big task into small steps."
+            4. **Recap & Save:** Summarize their mood and goals, then call 'complete_checkin'.
 
-        Important behavior rules (follow exactly):
-        1) At the very start of the interaction (your initial greeting), read the entire menu ONCE using this short menu text:
-        {format_menu_text()}
+            🚫 **SAFETY GUARDRAILS:**
+            - You are NOT a doctor or therapist.
+            - Do NOT diagnose conditions or prescribe treatments.
+            - If a user mentions self-harm or severe crisis, gently suggest professional help immediately.
 
-        - Speak/read that menu TEXT VERBATIM (or equivalently), then proceed to ask for the customer's order.
-        - After this initial menu read, DO NOT repeat the full menu again in the conversation. You may briefly repeat a single option if the user asks for it.
-
-        2) Maintain this exact order state object (exact keys and types):
-        {{
-            "drinkType": "string",
-            "size": "string",
-            "milk": "string",
-            "extras": ["string"],
-            "name": "string"
-        }}
-
-        3) Ask one clarifying question at a time. Do NOT ask for multiple missing fields in the same message.
-        - Typical flow: greeting + menu (once) -> drink -> size -> milk -> extras -> name.
-        - If the user answers multiple fields in one utterance, accept them and move on to the next missing field.
-
-        4) If the user indicates "no milk" or "no extras", record "milk": "No milk / Black" or "extras": [] and always confirm that choice explicitly with the user (e.g., "Just black, right?").
-
-        5) Only call the tool `submit_order` when all five fields have values. Immediately call it once the state is complete.
-
-        6) After the tool returns success, speak/return the neat summary it provides and thank the customer by name.
-
-        7) Be friendly and concise. Confirm ambiguous answers (ask for clarification if uncertain).
-
-        NOTE: The menu text above is long; read it once at the start, then stop repeating it.
-        """
+            🛠️ **Use the tools to record data as the user speaks.**
+            """,
+            tools=[
+                record_mood_and_energy,
+                record_objectives,
+                complete_checkin,
+            ],
         )
 
-    @function_tool
-    async def submit_order(
-        self,
-        ctx: RunContext,
-        drink_type: Annotated[str, "The type of coffee (e.g., Latte, Americano)"],
-        size: Annotated[str, "The size of the drink (Short, Tall, Grande, Venti, Trenta)"],
-        milk: Annotated[str, "Milk choice (e.g., Whole, Oat, No milk)"],
-        extras: Annotated[List[str], "List of modifications or syrups (can be empty list)"],
-        name: Annotated[str, "The customer's name"]
-    ):
-        """
-        Called only when all fields are collected. Saves order.json and returns a neat text summary.
-        """
-        order_state = {
-            "drinkType": drink_type,
-            "size": size,
-            "milk": milk,
-            "extras": extras,
-            "name": name
-        }
-
-        logger.info("Submitting order: %s", order_state)
-
-        try:
-            with open("order.json", "w", encoding="utf-8") as f:
-                json.dump(order_state, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.exception("Failed to save order.json: %s", e)
-            return "Sorry — there was a system error saving your order. Please try again."
-
-        extras_text = "None" if not extras else ", ".join(extras)
-        summary_lines = [
-            "Thanks — your order is placed. Summary:",
-            f"Name: {name}",
-            f"Drink: {drink_type}",
-            f"Size: {size}",
-            f"Milk: {milk}",
-            f"Extras: {extras_text}",
-            "",
-            "We'll begin preparing your drink now — enjoy!"
-        ]
-        summary = "\n".join(summary_lines)
-        logger.info("Order saved and summary prepared for %s", name)
-        return summary
+# ======================================================
+# 🎬 ENTRYPOINT & INITIALIZATION
+# ======================================================
 
 def prewarm(proc: JobProcess):
-    # Preload VAD model into process userdata for lower-latency VAD
     proc.userdata["vad"] = silero.VAD.load()
 
 async def entrypoint(ctx: JobContext):
-    # small runtime context logging
     ctx.log_context_fields = {"room": ctx.room.name}
 
+    print("🚀 STARTING WELLNESS SESSION")
+    
+    # 1. Load History from JSON
+    history = load_history()
+    history_summary = "No previous history found. This is the first session."
+    
+    if history:
+        last_entry = history[-1]
+        history_summary = (
+            f"Last check-in was on {last_entry.get('timestamp', 'unknown date')}. "
+            f"User felt {last_entry.get('mood')} with {last_entry.get('energy')} energy. "
+            f"Their goals were: {', '.join(last_entry.get('objectives', []))}."
+        )
+        print("📜 HISTORY LOADED:", history_summary)
+    else:
+        print("📜 NO HISTORY FOUND.")
+
+    # 2. Initialize Session Data
+    userdata = Userdata(
+        current_checkin=CheckInState(),
+        history_summary=history_summary
+    )
+
+    # 3. Setup Agent
     session = AgentSession(
         stt=deepgram.STT(model="nova-3"),
-        llm=google.LLM(
-            model="gemini-2.5-flash",
-        ),
+        llm=google.LLM(model="gemini-2.5-flash"),
         tts=murf.TTS(
-            voice="en-US-matthew",
-            style="Conversation",
-            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-            text_pacing=True
+            voice="en-US-natalie", # Using a softer, more caring voice
+            style="Promo",         # Often sounds more enthusiastic/supportive
+            text_pacing=True,
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        preemptive_generation=True,
+        userdata=userdata,
     )
-
-    usage_collector = metrics.UsageCollector()
-
-    @session.on("metrics_collected")
-    def _on_metrics_collected(ev: MetricsCollectedEvent):
-        metrics.log_metrics(ev.metrics)
-        usage_collector.collect(ev.metrics)
-
-    async def log_usage():
-        summary = usage_collector.get_summary()
-        logger.info(f"Usage: {summary}")
-
-    ctx.add_shutdown_callback(log_usage)
-
-    # Start the session
+    
+    # 4. Start
     await session.start(
-        agent=Assistant(),
+        agent=WellnessAgent(history_context=history_summary),
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC(),
+            noise_cancellation=noise_cancellation.BVC()
         ),
     )
 
